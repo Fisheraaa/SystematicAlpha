@@ -1,0 +1,1 @@
+"""Factor validation module"""
