@@ -185,18 +185,36 @@ def run_validation(
     assert run_id in ("csi300", "csi500"), "run_validation only supports single-index runs."
     index_code = "000300.SH" if run_id == "csi300" else "000905.SH"
 
-    returns_df = pd.read_parquet(PROCESSED / "returns.parquet")
-    factors    = load_all_factors()
+    returns_df = pd.read_parquet(PROCESSED / "returns.parquet").sort_index()
+    factors    = {k: v.sort_index() for k, v in load_all_factors().items()}
 
-    dates = pd.DatetimeIndex(
-        [pd.Timestamp(d) for d in rebalance_dates(is_start, is_end)]
-    )
+    reb_dates = [pd.Timestamp(d) for d in rebalance_dates(is_start, is_end)]
 
-    # Expand dates to all trading days in IS window for IC series
+    # Pre-compute universe for each rebalance date (avoid per-day file IO)
+    logger.info("[%s] Pre-computing universes for %d rebalance dates…", run_id, len(reb_dates))
+    reb_universe_map: dict[pd.Timestamp, list[str]] = {}
+    for rd in reb_dates:
+        u = get_universe(rd, index_code)
+        if u:
+            reb_universe_map[rd] = u
+
+    if not reb_universe_map:
+        logger.error("[%s] No valid universe found in IS period — check constituent data.", run_id)
+        return {"ic_summary": pd.DataFrame(), "ic_decay": pd.DataFrame(), "ic_series": pd.DataFrame()}
+
+    # Map each trading day to its most recent rebalance date's universe
+    sorted_reb = sorted(reb_universe_map.keys())
     all_dates = returns_df.loc[is_start:is_end].index
+    # Only keep dates on or after the first valid rebalance date
+    first_valid = sorted_reb[0]
+    all_dates = all_dates[all_dates >= first_valid]
 
-    def universe_fn(dt):
-        return get_universe(dt, index_code)
+    def universe_fn(dt: pd.Timestamp) -> list[str]:
+        # Find most recent rebalance date <= dt
+        valid = [r for r in sorted_reb if r <= dt]
+        if not valid:
+            return []
+        return reb_universe_map[valid[-1]]
 
     summary_rows = []
     decay_frames = {}

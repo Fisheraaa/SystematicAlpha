@@ -148,6 +148,9 @@ def run_quantile_analysis(
 
         result_rows.append(row)
 
+    if not result_rows:
+        logger.warning("[%s] No quantile results — universe may be empty for IS period.", run_id)
+        return pd.DataFrame()
     result_df = pd.DataFrame(result_rows).set_index("factor")
 
     out_dir = RESULTS / run_id

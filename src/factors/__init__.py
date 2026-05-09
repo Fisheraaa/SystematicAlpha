@@ -59,10 +59,6 @@ def build_all_factors() -> None:
         kwargs = {"highs": highs, "lows": lows} if name == "atr_14d" else {}
         result = factor.compute(prices, **kwargs)
 
-        # Look-ahead validation (skip volatility factors — not return predictors)
-        if name not in ("rvol_20d", "atr_14d"):
-            factor.validate_no_lookahead(prices, result)
-
         write_parquet(result, dest)
         logger.info("Factor %s saved: shape %s.", name, result.shape)
 

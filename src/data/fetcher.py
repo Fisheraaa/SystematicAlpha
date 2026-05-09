@@ -19,24 +19,33 @@ logger = logging.getLogger(__name__)
 
 
 def _pro() -> ts.pro.client.DataApi:
+    import os
     cfg = load_config()
-    ts.set_token(cfg["data"]["token"])
+    token = os.environ.get("TUSHARE_TOKEN") or cfg["data"]["token"]
+    ts.set_token(token)
     return ts.pro_api()
 
 
 def _rate_limited_call(func, *args, retries: int = 5, **kwargs) -> pd.DataFrame:
-    """Wraps a Tushare API call with exponential back-off on rate-limit errors."""
+    """Wraps a Tushare API call with exponential back-off on EXCEPTIONS only.
+    An empty DataFrame is returned as-is (not treated as a failure).
+    """
+    import pandas as pd
     for attempt in range(retries):
         try:
             result = func(*args, **kwargs)
-            if result is not None and not result.empty:
-                return result
-            time.sleep(0.4)
+            # Empty is valid (no data for this period) — return immediately
+            if result is None:
+                return pd.DataFrame()
+            return result
         except Exception as exc:
             wait = 2 ** attempt
             logger.warning("API error (%s), retrying in %ds…", exc, wait)
             time.sleep(wait)
-    raise RuntimeError(f"Tushare call failed after {retries} attempts: {func.__name__}")
+    raise RuntimeError(
+        f"Tushare call failed after {retries} attempts: "
+        f"{getattr(func, '__name__', repr(func))}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -99,9 +108,11 @@ def fetch_index_weights() -> None:
 
         df = pd.concat(chunks, ignore_index=True)
         df["trade_date"] = pd.to_datetime(df["trade_date"])
+        # Tushare returns the weight column as 'weight'; normalise to 'i_weight'
+        if "weight" in df.columns and "i_weight" not in df.columns:
+            df = df.rename(columns={"weight": "i_weight"})
         df = df.sort_values(["trade_date", "con_code"]).drop_duplicates()
         write_parquet(df[["trade_date", "con_code", "i_weight"]], dest)
-        logger.info("Index weights for %s saved (%d rows).", index_code, len(df))
 
 
 # ---------------------------------------------------------------------------

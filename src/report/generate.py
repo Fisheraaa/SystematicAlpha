@@ -71,17 +71,27 @@ def _metrics_table(run_ids: list[str]) -> str:
         trades_path = RESULTS / run_id / "trades.parquet"
         trades = pd.read_parquet(trades_path) if trades_path.exists() else pd.DataFrame()
 
+        daily.index = pd.to_datetime(daily.index)
+
         for period, (s, e) in (
             ("IS",  (cfg_wf["is_start"],  cfg_wf["is_end"])),
             ("OOS", (cfg_wf["oos_start"], cfg_wf["oos_end"])),
         ):
-            mask  = (daily.index >= s) & (daily.index <= e)
-            eq    = daily.loc[mask, "equity"]
-            bmark = eq.copy(); bmark[:] = eq.iloc[0]   # flat line placeholder
-            t_mask = (pd.to_datetime(trades.get("date", pd.Series(dtype=str))) >= s) & \
-                     (pd.to_datetime(trades.get("date", pd.Series(dtype=str))) <= e) \
-                     if not trades.empty else pd.Series(False, index=trades.index)
-            t_sub  = trades[t_mask] if not trades.empty else pd.DataFrame()
+            mask = (daily.index >= pd.Timestamp(s)) & (daily.index <= pd.Timestamp(e))
+            eq   = daily.loc[mask, "equity"].dropna()
+
+            if len(eq) < 2:
+                metric_rows_data[run_id][period] = {}
+                continue
+
+            bmark = pd.Series(float(eq.iloc[0]), index=eq.index)
+
+            if not trades.empty and "date" in trades.columns:
+                td = pd.to_datetime(trades["date"])
+                t_sub = trades[(td >= pd.Timestamp(s)) & (td <= pd.Timestamp(e))]
+            else:
+                t_sub = pd.DataFrame()
+
             m = compute_all_metrics(eq, bmark, t_sub)
             metric_rows_data[run_id][period] = m
 

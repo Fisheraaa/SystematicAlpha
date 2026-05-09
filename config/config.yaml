@@ -1,5 +1,5 @@
 data:
-  token: "YOUR_TUSHARE_TOKEN"          # replace before running --fetch
+  token: "YOUR_TUSHARE_TOKEN"          # set via TUSHARE_TOKEN env var or replace before running --fetch
   indices: ["000300.SH", "000905.SH"]
   start_date: "2015-01-01"
   end_date:   "2024-12-31"
@@ -77,7 +77,7 @@ walk_forward:
   train_months: 24
   test_months:   6
   step_months:   3
-  is_start:  "2015-01-01"
+  is_start:  "2016-02-01"
   is_end:    "2020-12-31"
   oos_start: "2021-01-01"
   oos_end:   "2024-12-31"

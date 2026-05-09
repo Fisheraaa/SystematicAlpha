@@ -1,0 +1,40 @@
+# Data — too large and contains proprietary market data
+data/
+
+# Generated outputs
+report.html
+*.html
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+env/
+venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+*.log
+
+# Private docs and utilities
+概述.md
+2_github_readme.md
+PRD_SystematicAlpha_v1.1.md
+PRD_中文说明_v1.1.md
+debug_universe.py
+verify_data.py

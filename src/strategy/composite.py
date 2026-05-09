@@ -38,11 +38,14 @@ def _load_ic_weights(run_id: str) -> dict[str, float]:
         return {f: 0.25 for f in ("mom_5d", "mom_20d", "zscore_20d", "rsi_14d")}
 
     summary = pd.read_parquet(result_path)
-    ic_means = summary["mean_ic"].abs()
-    total = ic_means.sum()
+    ic_signed = summary["mean_ic"]
+    ic_abs    = ic_signed.abs()
+    total     = ic_abs.sum()
     if total == 0:
-        return {f: 0.25 for f in ic_means.index}
-    return (ic_means / total).to_dict()
+        return {f: 0.25 for f in ic_signed.index}
+    # weight ∝ |IC|
+    weights = ic_abs / total * ic_signed.apply(lambda x: 1.0 if x >= 0 else -1.0)
+    return weights.to_dict()
 
 
 def compute_composite(

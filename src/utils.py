@@ -31,4 +31,4 @@ def write_parquet(df: pd.DataFrame, path: pathlib.Path | str) -> None:
 def trading_calendar() -> pd.DatetimeIndex:
     """Return the full A-share trading calendar as a DatetimeIndex."""
     cal = read_parquet(CACHE / "trading_calendar.parquet")
-    return pd.DatetimeIndex(cal[cal["is_open"] == 1]["cal_date"])
+    return pd.DatetimeIndex(cal[cal["is_open"] == 1]["cal_date"]).sort_values()

@@ -87,11 +87,12 @@ def build_panels() -> None:
     end   = pd.Timestamp(cfg["data"]["end_date"])
     idx   = cal[(cal >= start) & (cal <= end)]
 
-    prices  = prices.reindex(idx).ffill()
-    opens   = opens.reindex(idx).ffill()
-    highs   = highs.reindex(idx).ffill()
-    lows    = lows.reindex(idx).ffill()
-    volumes = volumes.reindex(idx).fillna(0)
+    idx = idx.sort_values()                      # guarantee ascending order
+    prices  = prices.reindex(idx).sort_index().ffill()
+    opens   = opens.reindex(idx).sort_index().ffill()
+    highs   = highs.reindex(idx).sort_index().ffill()
+    lows    = lows.reindex(idx).sort_index().ffill()
+    volumes = volumes.reindex(idx).sort_index().fillna(0)
 
     # ── Suspension flag ───────────────────────────────────────────────────────
     # A stock is considered suspended when volume == 0 for that trading day.

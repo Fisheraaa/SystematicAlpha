@@ -168,7 +168,7 @@ def ic_time_series() -> go.Figure:
                 x=pd.concat([roll_mean.index.to_series(), roll_mean.index.to_series()[::-1]]),
                 y=pd.concat([roll_mean + roll_std, (roll_mean - roll_std)[::-1]]),
                 fill="toself",
-                fillcolor=colour.replace(")", ",0.12)").replace("#", "rgba(").replace("rgba(", "rgba("),
+                fillcolor="rgba(128,128,128,0.10)",   # neutral grey band for all factors
                 line=dict(width=0),
                 showlegend=False,
                 name=f"{label} ±1σ",
