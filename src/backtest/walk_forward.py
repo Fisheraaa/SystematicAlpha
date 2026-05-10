@@ -121,24 +121,34 @@ def run_walk_forward(run_id: str) -> pd.DataFrame:
         )
 
         # ── Step 1: calibrate IC weights on training fold ──────────────────
+        # Use a window-specific output dir so walk-forward never overwrites
+        # the main ic_summary.parquet produced by --validate.
+        wf_val_dir_300 = RESULTS / "csi300" / f"wf_val_{wid:02d}"
+        wf_val_dir_500 = RESULTS / "csi500" / f"wf_val_{wid:02d}"
+
         if run_id == "combined":
-            # Calibrate on each sub-universe; blend 40/60 in build_composite_weights
-            for sub_id in ("csi300", "csi500"):
+            for sub_id, val_dir in (("csi300", wf_val_dir_300), ("csi500", wf_val_dir_500)):
                 try:
-                    run_validation(sub_id, t_s, t_e)
+                    run_validation(sub_id, t_s, t_e, output_dir=val_dir)
                 except Exception as exc:
                     logger.warning("Validation failed for %s window %d: %s", sub_id, wid, exc)
             ic_weights = build_composite_weights("combined", t_s, t_e)
         else:
+            val_dir = wf_val_dir_300 if run_id == "csi300" else wf_val_dir_500
             try:
-                run_validation(run_id, t_s, t_e)
+                run_validation(run_id, t_s, t_e, output_dir=val_dir)
             except Exception as exc:
                 logger.warning("Validation failed window %d: %s", wid, exc)
             ic_weights = build_composite_weights(run_id, t_s, t_e)
 
         # ── Step 2: backtest on test fold ─────────────────────────────────
+        # Use a unique stem so walk-forward windows never overwrite the main
+        # full-period daily_state.parquet produced by --backtest.
+        wf_stem = f"wf_window_{wid:02d}"
         try:
-            daily_df, trades_df = run_backtest(run_id, te_s, te_e, ic_weights)
+            daily_df, trades_df = run_backtest(
+                run_id, te_s, te_e, ic_weights, output_stem=wf_stem
+            )
         except Exception as exc:
             logger.error("Backtest failed window %d: %s", wid, exc)
             continue

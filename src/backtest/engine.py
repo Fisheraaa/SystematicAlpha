@@ -282,9 +282,22 @@ class BacktestEngine:
     # Main loop
     # ------------------------------------------------------------------
 
-    def run(self, start: str, end: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    def run(
+        self,
+        start: str,
+        end: str,
+        output_stem: str = "daily_state",
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
         """
         Execute the backtest from `start` to `end`.
+
+        Args:
+            start:       start date 'YYYY-MM-DD'
+            end:         end date   'YYYY-MM-DD'
+            output_stem: filename stem for saved parquet files.
+                         Main backtest uses 'daily_state' (default).
+                         Walk-forward windows use e.g. 'wf_window_03'
+                         so they never overwrite the full-period result.
 
         Returns:
             (daily_state_df, trades_df)
@@ -312,12 +325,13 @@ class BacktestEngine:
 
         trades_df = pd.DataFrame(self.trades)
 
-        # Persist
+        # Persist — use output_stem so walk-forward windows don't overwrite
+        # the main full-period daily_state.parquet.
         out_dir = RESULTS / self.run_id
         out_dir.mkdir(parents=True, exist_ok=True)
-        write_parquet(daily_df, out_dir / "daily_state.parquet")
+        write_parquet(daily_df, out_dir / f"{output_stem}.parquet")
         if not trades_df.empty:
-            write_parquet(trades_df, out_dir / "trades.parquet")
+            write_parquet(trades_df, out_dir / f"{output_stem}_trades.parquet")
 
         logger.info(
             "[%s] Backtest complete: %d days, final equity %.0f CNY.",
@@ -335,7 +349,8 @@ def run_backtest(
     start: str,
     end: str,
     ic_weights: dict[str, float],
+    output_stem: str = "daily_state",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Instantiate engine and run. Returns (daily_state_df, trades_df)."""
     engine = BacktestEngine(run_id, ic_weights)
-    return engine.run(start, end)
+    return engine.run(start, end, output_stem=output_stem)

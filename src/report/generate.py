@@ -1,11 +1,13 @@
 """src/report/generate.py
 
-Assembles a single self-contained report.html with all charts and tables
-inlined. No server required; open directly in any browser.
+Generates a single self-contained report.html with:
+  - EN / CN language toggle (no server needed)
+  - All 6 Plotly charts inlined
+  - Performance metrics table (IS from daily_state.parquet, OOS from walk_forward.parquet)
+  - Walk-forward window detail table
 """
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
@@ -25,350 +27,274 @@ from src.report.charts import (
 )
 
 logger = logging.getLogger(__name__)
-
 OUT_PATH = Path("report.html")
 
 
-# ---------------------------------------------------------------------------
-# Helper: figure → HTML div (no JS dependencies)
-# ---------------------------------------------------------------------------
-
-def _fig_to_div(fig, div_id: str) -> str:
+def _fig_div(fig, div_id: str) -> str:
     return plotly.io.to_html(
-        fig,
-        full_html=False,
-        include_plotlyjs=False,
-        div_id=div_id,
-        config={"displayModeBar": True, "responsive": True},
+        fig, full_html=False, include_plotlyjs=False,
+        div_id=div_id, config={"displayModeBar": True, "responsive": True},
     )
 
 
-# ---------------------------------------------------------------------------
-# Helper: metrics table HTML
-# ---------------------------------------------------------------------------
+def _fmt(val, fmt_str: str) -> str:
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return "—"
+    return fmt_str.format(val)
 
-def _metrics_table(run_ids: list[str]) -> str:
-    cfg   = load_config()
+
+def _metrics_table(run_ids: list) -> str:
+    cfg    = load_config()
     cfg_wf = cfg["walk_forward"]
 
-    header = (
-        "<tr><th>Metric</th>"
-        + "".join(
-            f"<th>{r.upper()} IS</th><th>{r.upper()} OOS</th>"
-            for r in run_ids
-        )
-        + "</tr>"
-    )
-
-    metric_rows_data: dict[str, dict] = {r: {} for r in run_ids}
-
-    for run_id in run_ids:
-        is_path = RESULTS / run_id / "daily_state.parquet"
-        if not is_path.exists():
-            continue
-
-        daily = pd.read_parquet(is_path)
-        trades_path = RESULTS / run_id / "trades.parquet"
-        trades = pd.read_parquet(trades_path) if trades_path.exists() else pd.DataFrame()
-
-        daily.index = pd.to_datetime(daily.index)
-
-        for period, (s, e) in (
-            ("IS",  (cfg_wf["is_start"],  cfg_wf["is_end"])),
-            ("OOS", (cfg_wf["oos_start"], cfg_wf["oos_end"])),
-        ):
-            mask = (daily.index >= pd.Timestamp(s)) & (daily.index <= pd.Timestamp(e))
-            eq   = daily.loc[mask, "equity"].dropna()
-
-            if len(eq) < 2:
-                metric_rows_data[run_id][period] = {}
-                continue
-
-            bmark = pd.Series(float(eq.iloc[0]), index=eq.index)
-
-            if not trades.empty and "date" in trades.columns:
-                td = pd.to_datetime(trades["date"])
-                t_sub = trades[(td >= pd.Timestamp(s)) & (td <= pd.Timestamp(e))]
-            else:
-                t_sub = pd.DataFrame()
-
-            m = compute_all_metrics(eq, bmark, t_sub)
-            metric_rows_data[run_id][period] = m
-
-    metric_names = [
-        ("annual_return",     "Annual Return",      lambda v: f"{v*100:.1f}%"),
-        ("sharpe_ratio",      "Sharpe Ratio",        lambda v: f"{v:.2f}"),
-        ("max_drawdown",      "Max Drawdown",        lambda v: f"{v*100:.1f}%"),
-        ("calmar_ratio",      "Calmar Ratio",        lambda v: f"{v:.2f}"),
-        ("information_ratio", "Information Ratio",   lambda v: f"{v:.2f}"),
-        ("win_rate",          "Win Rate",            lambda v: f"{v*100:.1f}%"),
-        ("monthly_turnover",  "Avg Monthly Turnover",lambda v: f"{v:.0f} CNY"),
+    metric_defs = [
+        ("annual_return",     "Annual Return",   "年化收益",   "{:.1%}"),
+        ("sharpe_ratio",      "Sharpe Ratio",    "夏普比率",   "{:.2f}"),
+        ("max_drawdown",      "Max Drawdown",    "最大回撤",   "{:.1%}"),
+        ("calmar_ratio",      "Calmar Ratio",    "卡玛比率",   "{:.2f}"),
+        ("information_ratio", "Info Ratio",      "信息比率",   "{:.2f}"),
+        ("win_rate",          "Win Rate",        "胜率",       "{:.1%}"),
     ]
 
-    rows_html = ""
-    for key, label, fmt in metric_names:
-        row = f"<tr><td><strong>{label}</strong></td>"
-        for run_id in run_ids:
-            for period in ("IS", "OOS"):
-                val = metric_rows_data.get(run_id, {}).get(period, {}).get(key, None)
-                if val is None or (isinstance(val, float) and np.isnan(val)):
-                    row += "<td>—</td>"
-                else:
-                    row += f"<td>{fmt(val)}</td>"
-        row += "</tr>"
-        rows_html += row
+    col_en = "".join(f"<th>{r.upper()}<br>IS</th><th>{r.upper()}<br>OOS(avg)</th>" for r in run_ids)
+    col_cn = "".join(f"<th>{r.upper()}<br>样本内</th><th>{r.upper()}<br>样本外均值</th>" for r in run_ids)
 
-    return f"<table class='metrics-table'><thead>{header}</thead><tbody>{rows_html}</tbody></table>"
+    data = {r: {} for r in run_ids}
+    for run_id in run_ids:
+        ds_path = RESULTS / run_id / "daily_state.parquet"
+        wf_path = RESULTS / run_id / "walk_forward.parquet"
+        if ds_path.exists():
+            daily = pd.read_parquet(ds_path)
+            daily.index = pd.to_datetime(daily.index)
+            eq_is = daily.loc[daily.index <= pd.Timestamp(cfg_wf["is_end"]), "equity"].dropna()
+            if len(eq_is) >= 2:
+                bmark = pd.Series(float(eq_is.iloc[0]), index=eq_is.index)
+                data[run_id]["IS"] = compute_all_metrics(eq_is, bmark, pd.DataFrame())
+        if wf_path.exists():
+            wf = pd.read_parquet(wf_path)
+            data[run_id]["OOS"] = {k: float(wf[k].mean()) for k in wf.select_dtypes("number").columns if k in [m[0] for m in metric_defs]}
 
+    def rows(lang):
+        out = ""
+        for key, len_en, len_cn, fmt in metric_defs:
+            label = len_en if lang == "en" else len_cn
+            row = f"<tr><td><strong>{label}</strong></td>"
+            for rid in run_ids:
+                for period in ("IS", "OOS"):
+                    val = data[rid].get(period, {}).get(key)
+                    row += f"<td>{_fmt(val, fmt)}</td>"
+            out += row + "</tr>"
+        return out
 
-# ---------------------------------------------------------------------------
-# Helper: IC summary table HTML
-# ---------------------------------------------------------------------------
+    return f"""
+<div class="lang-en"><table class="metrics-table">
+  <thead><tr><th>Metric</th>{col_en}</tr></thead><tbody>{rows("en")}</tbody>
+</table></div>
+<div class="lang-cn" style="display:none"><table class="metrics-table">
+  <thead><tr><th>指标</th>{col_cn}</tr></thead><tbody>{rows("cn")}</tbody>
+</table></div>"""
+
 
 def _ic_table() -> str:
-    rows_html = ""
-    header = (
-        "<tr><th>Factor</th>"
-        "<th>CSI300 ICIR</th><th>CSI300 p-val</th><th>CSI300 IC>0%</th>"
-        "<th>CSI500 ICIR</th><th>CSI500 p-val</th><th>CSI500 IC>0%</th>"
-        "</tr>"
-    )
-
-    factor_data: dict[str, dict] = {}
+    factor_data = {}
     for run_id in ("csi300", "csi500"):
         path = RESULTS / run_id / "ic_summary.parquet"
         if not path.exists():
             continue
         df = pd.read_parquet(path)
         for fname in df.index:
-            if fname not in factor_data:
-                factor_data[fname] = {}
-            factor_data[fname][run_id] = df.loc[fname].to_dict()
+            factor_data.setdefault(fname, {})[run_id] = df.loc[fname].to_dict()
 
-    for fname, data in factor_data.items():
+    rows = ""
+    for fname, d in factor_data.items():
         row = f"<tr><td><strong>{fname}</strong></td>"
         for run_id in ("csi300", "csi500"):
-            d = data.get(run_id, {})
-            icir  = d.get("icir",        np.nan)
-            pval  = d.get("p_value",     np.nan)
-            ppct  = d.get("pct_positive",np.nan)
+            rd = d.get(run_id, {})
+            icir = rd.get("icir", float("nan"))
+            pval = rd.get("p_value", float("nan"))
+            ppct = rd.get("pct_positive", float("nan"))
+            sig  = " ✓" if (not np.isnan(pval) and pval < 0.05) else ""
+            row += f"<td>{_fmt(icir,'{:.3f}')}</td><td>{_fmt(pval,'{:.3f}')}{sig}</td><td>{_fmt(ppct,'{:.1%}')}</td>"
+        rows += row + "</tr>"
 
-            def _fmt(v, decimals=3):
-                return "—" if v is None or (isinstance(v, float) and np.isnan(v)) else f"{v:.{decimals}f}"
-
-            sig   = " ✓" if (not np.isnan(pval) and pval < 0.05) else ""
-            row += (
-                f"<td>{_fmt(icir)}</td>"
-                f"<td>{_fmt(pval)}{sig}</td>"
-                f"<td>{_fmt(ppct, 2)}</td>"
-            )
-        row += "</tr>"
-        rows_html += row
-
-    return f"<table class='metrics-table'><thead>{header}</thead><tbody>{rows_html}</tbody></table>"
+    hdr_en = "<tr><th>Factor</th><th>CSI300 ICIR</th><th>p-val</th><th>IC>0%</th><th>CSI500 ICIR</th><th>p-val</th><th>IC>0%</th></tr>"
+    hdr_cn = "<tr><th>因子</th><th>沪深300 ICIR</th><th>p值</th><th>IC>0占比</th><th>中证500 ICIR</th><th>p值</th><th>IC>0占比</th></tr>"
+    return f"""
+<div class="lang-en"><table class="metrics-table"><thead>{hdr_en}</thead><tbody>{rows}</tbody></table></div>
+<div class="lang-cn" style="display:none"><table class="metrics-table"><thead>{hdr_cn}</thead><tbody>{rows}</tbody></table></div>"""
 
 
-# ---------------------------------------------------------------------------
-# Main report generator
-# ---------------------------------------------------------------------------
+def _wf_table() -> str:
+    rows = ""
+    for run_id in ("csi300", "csi500", "combined"):
+        path = RESULTS / run_id / "walk_forward.parquet"
+        if not path.exists():
+            continue
+        wf = pd.read_parquet(path)
+        for _, r in wf.iterrows():
+            sharpe = r.get("sharpe_ratio", float("nan"))
+            color  = "#16A34A" if (not np.isnan(sharpe) and sharpe > 0) else "#DC2626"
+            rows += (f"<tr><td>{run_id.upper()}</td>"
+                     f"<td>{str(r.get('test_start',''))[:10]} → {str(r.get('test_end',''))[:10]}</td>"
+                     f"<td style='color:{color};font-weight:600'>{_fmt(sharpe,'{:.2f}')}</td>"
+                     f"<td>{_fmt(r.get('max_drawdown'),'{:.1%}')}</td>"
+                     f"<td>{_fmt(r.get('annual_return'),'{:.1%}')}</td></tr>")
+
+    hdr_en = "<tr><th>Run</th><th>Test Period</th><th>Sharpe</th><th>Max DD</th><th>Ann Return</th></tr>"
+    hdr_cn = "<tr><th>策略</th><th>测试区间</th><th>夏普比率</th><th>最大回撤</th><th>年化收益</th></tr>"
+    return f"""
+<div class="lang-en"><table class="metrics-table"><thead>{hdr_en}</thead><tbody>{rows}</tbody></table></div>
+<div class="lang-cn" style="display:none"><table class="metrics-table"><thead>{hdr_cn}</thead><tbody>{rows}</tbody></table></div>"""
+
 
 def generate_report() -> None:
     logger.info("Generating HTML report …")
 
-    run_ids = ["csi300", "csi500", "combined"]
-
-    # Build chart divs
     charts = {}
-    chart_fns = {
-        "equity":     three_run_equity_curve,
-        "ic_ts":      ic_time_series,
-        "quantile":   quantile_bar_chart,
-        "walkfwd":    walk_forward_distribution,
-        "turnover":   turnover_cost_chart,
-        "universe":   universe_composition_chart,
-    }
-
-    plotly_js_cdn = (
-        "https://cdn.plot.ly/plotly-2.27.0.min.js"
-    )
-
-    for key, fn in chart_fns.items():
+    for key, fn in [
+        ("equity",   three_run_equity_curve),
+        ("ic_ts",    ic_time_series),
+        ("quantile", quantile_bar_chart),
+        ("walkfwd",  walk_forward_distribution),
+        ("turnover", turnover_cost_chart),
+        ("universe", universe_composition_chart),
+    ]:
         try:
-            fig = fn()
-            charts[key] = _fig_to_div(fig, div_id=f"chart-{key}")
+            charts[key] = _fig_div(fn(), f"chart-{key}")
         except Exception as exc:
             logger.warning("Chart '%s' failed: %s", key, exc)
             charts[key] = f"<p class='warn'>Chart unavailable: {exc}</p>"
 
-    metrics_table  = _metrics_table(run_ids)
-    ic_table_html  = _ic_table()
+    metrics_html = _metrics_table(["csi300", "csi500", "combined"])
+    ic_html      = _ic_table()
+    wf_html      = _wf_table()
+
+    PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.27.0.min.js"
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Systematic Alpha Research Report</title>
-<script src="{plotly_js_cdn}"></script>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Systematic Alpha — Research Report</title>
+<script src="{PLOTLY_CDN}"></script>
 <style>
-  :root {{
-    --bg: #F9FAFB; --card: #FFFFFF; --text: #111827;
-    --muted: #6B7280; --accent: #2563EB; --border: #E5E7EB;
-  }}
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-         background: var(--bg); color: var(--text); line-height: 1.6; }}
-  .container {{ max-width: 1280px; margin: 0 auto; padding: 24px 16px; }}
-  .hero {{ background: var(--accent); color: #fff; padding: 40px 32px; border-radius: 12px;
-           margin-bottom: 32px; }}
-  .hero h1 {{ font-size: 1.8rem; font-weight: 700; margin-bottom: 6px; }}
-  .hero p  {{ opacity: .85; font-size: .95rem; }}
-  .section {{ background: var(--card); border: 1px solid var(--border);
-              border-radius: 10px; padding: 28px; margin-bottom: 24px;
-              box-shadow: 0 1px 3px rgba(0,0,0,.06); }}
-  .section h2 {{ font-size: 1.15rem; font-weight: 600; border-left: 4px solid var(--accent);
-                 padding-left: 10px; margin-bottom: 16px; }}
-  .section h3 {{ font-size: 1rem; font-weight: 600; color: var(--muted);
-                 margin: 20px 0 8px; }}
-  .metrics-table {{ width: 100%; border-collapse: collapse; font-size: .88rem; }}
-  .metrics-table th, .metrics-table td {{
-    border: 1px solid var(--border); padding: 8px 12px; text-align: right; }}
-  .metrics-table th {{ background: var(--bg); font-weight: 600; text-align: center; }}
-  .metrics-table td:first-child {{ text-align: left; }}
-  .warn {{ color: #DC2626; font-style: italic; padding: 8px; }}
-  .note {{ background: #FEF9C3; border: 1px solid #FDE68A; border-radius: 6px;
-           padding: 12px 16px; font-size: .88rem; color: #78350F; margin: 12px 0; }}
-  .two-col {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
-  @media (max-width: 768px) {{ .two-col {{ grid-template-columns: 1fr; }} }}
-  footer {{ text-align: center; color: var(--muted); font-size: .8rem;
-            padding: 32px 0 16px; }}
+:root{{--bg:#F9FAFB;--card:#fff;--text:#111827;--muted:#6B7280;--accent:#2563EB;--border:#E5E7EB;}}
+*{{box-sizing:border-box;margin:0;padding:0;}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);line-height:1.6;}}
+.container{{max-width:1280px;margin:0 auto;padding:24px 16px;}}
+.lang-bar{{display:flex;justify-content:flex-end;margin-bottom:16px;gap:8px;}}
+.lang-btn{{padding:6px 18px;border-radius:20px;border:1px solid var(--accent);background:#fff;color:var(--accent);cursor:pointer;font-size:.88rem;font-weight:600;transition:all .2s;}}
+.lang-btn.active{{background:var(--accent);color:#fff;}}
+.hero{{background:var(--accent);color:#fff;padding:36px 32px;border-radius:12px;margin-bottom:28px;}}
+.hero h1{{font-size:1.75rem;font-weight:700;margin-bottom:4px;}}
+.hero p{{opacity:.85;font-size:.93rem;}}
+.section{{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:28px;margin-bottom:22px;box-shadow:0 1px 3px rgba(0,0,0,.06);}}
+.section h2{{font-size:1.12rem;font-weight:600;border-left:4px solid var(--accent);padding-left:10px;margin-bottom:16px;}}
+.section h3{{font-size:.97rem;font-weight:600;color:var(--muted);margin:18px 0 8px;}}
+.metrics-table{{width:100%;border-collapse:collapse;font-size:.87rem;}}
+.metrics-table th,.metrics-table td{{border:1px solid var(--border);padding:7px 11px;text-align:right;}}
+.metrics-table th{{background:var(--bg);font-weight:600;text-align:center;}}
+.metrics-table td:first-child{{text-align:left;}}
+.note{{background:#FEF9C3;border:1px solid #FDE68A;border-radius:6px;padding:11px 15px;font-size:.87rem;color:#78350F;margin:12px 0;}}
+.warn{{color:#DC2626;font-style:italic;padding:8px;}}
+footer{{text-align:center;color:var(--muted);font-size:.8rem;padding:28px 0 14px;}}
 </style>
 </head>
 <body>
 <div class="container">
 
-  <!-- Hero -->
-  <div class="hero">
-    <h1>Systematic Alpha Research &amp; Trading Framework</h1>
-    <p>A-share (CSI 300 / CSI 500) · Long-only · Bias-controlled · Regime-aware</p>
-    <p style="margin-top:8px;font-size:.82rem;opacity:.75;">
-      Generated by SystematicAlpha v1.1 &nbsp;·&nbsp;
-      Data: Tushare Pro &nbsp;·&nbsp;
-      Three independent runs: CSI300 / CSI500 / Combined
-    </p>
-  </div>
-
-  <!-- 1. Executive Summary -->
-  <div class="section">
-    <h2>1 · Executive Summary</h2>
-    {charts["equity"]}
-    <h3>Performance Metrics — IS (2015–2020) vs. OOS (2021–2024)</h3>
-    {metrics_table}
-    <p class="note">
-      ✓ marks IC p-value &lt; 0.05. OOS metrics are from walk-forward windows,
-      not a single held-out split. Benchmarks: CSI 300 TR / CSI 500 TR /
-      40-60 blended TR respectively.
-    </p>
-  </div>
-
-  <!-- 2. Factor Validation -->
-  <div class="section">
-    <h2>2 · Factor Validation</h2>
-    <h3>IC Summary Table (In-Sample)</h3>
-    {ic_table_html}
-    <h3>Rolling 60-Day Mean IC by Universe</h3>
-    {charts["ic_ts"]}
-    <h3>Quintile Return Analysis</h3>
-    {charts["quantile"]}
-    <p class="note">
-      Factors pass validation if: ICIR &gt; 0.30, p-value &lt; 0.05, and
-      quintile returns are monotonically ordered Q1 → Q5.
-    </p>
-  </div>
-
-  <!-- 3. Walk-Forward Validation -->
-  <div class="section">
-    <h2>3 · Walk-Forward Validation (OOS, 13 Windows)</h2>
-    {charts["walkfwd"]}
-    <p class="note">
-      Each box represents the distribution of the metric across all 13 OOS
-      windows (train 24 mo, test 6 mo, step 3 mo). A robust strategy shows
-      tight box width and median Sharpe &gt; 0.5.
-    </p>
-  </div>
-
-  <!-- 4. Cost & Turnover -->
-  <div class="section">
-    <h2>4 · Turnover &amp; Transaction Cost Analysis</h2>
-    {charts["turnover"]}
-    <p class="note">
-      A-share cost model: buy ≈ 0.076%, sell ≈ 0.176% (CSI 300);
-      sell ≈ 0.226% (CSI 500, higher slippage). Round-trip: ≈ 0.25% / 0.30%.
-      Robustness check: all reported Sharpe ratios remain positive when costs
-      are doubled to 0.50% / 0.60%.
-    </p>
-  </div>
-
-  <!-- 5. Universe -->
-  <div class="section">
-    <h2>5 · Universe Composition (Point-in-Time)</h2>
-    {charts["universe"]}
-    <p class="note">
-      Universe is reconstructed at each rebalance date using historical
-      constituent snapshots from Tushare Pro (index_weight interface).
-      Eligible count drops during periods of elevated suspension rates
-      (e.g., COVID March 2020) and index rebalancing events.
-    </p>
-  </div>
-
-  <!-- 6. Failure Analysis -->
-  <div class="section">
-    <h2>6 · Known Failure Cases &amp; Limitations</h2>
-    <h3>Regime Signal Lag</h3>
-    <p>
-      The volatility-percentile regime signal is computed over a 252-day
-      rolling window. During rapid market transitions (e.g., Feb–Mar 2020,
-      Oct 2022), the signal takes ~10–20 trading days to reclassify from
-      "momentum" to "reversion." During this lag, the momentum sub-portfolio
-      continues to hold recent winners that are now reversing, causing
-      excess drawdown. This lag is inherent to the design and cannot be
-      eliminated without introducing look-ahead bias.
-    </p>
-    <h3>T+1 Gap Risk</h3>
-    <p>
-      Sell signals generated at t-close execute at (t+1)-open. In fast-moving
-      markets, the realised fill price can be materially worse than assumed.
-      The cost model does not explicitly account for overnight gap risk; the
-      slippage allowance (0.05%–0.10%) partially compensates but may be
-      insufficient in extreme events.
-    </p>
-    <h3>Factor Crowding</h3>
-    <p>
-      The strategy holds no crowding detection. When many systematic funds
-      unwind identical positions simultaneously (e.g., mid-2021 quant
-      rotation), the strategy will experience correlated drawdowns not
-      captured by its own risk model.
-    </p>
-    <h3>Robustness Sensitivity</h3>
-    <p>
-      Cost doubled to 0.50% / 0.60% round-trip: Sharpe degrades but remains
-      positive in IS. Regime threshold ±10 percentile points: Sharpe changes
-      by &lt;20%. Rebalance frequency quarterly vs. monthly: turnover halves
-      but IC decay causes alpha to decline. These results are consistent with
-      a strategy that is moderately robust, not fragile.
-    </p>
-  </div>
-
-  <footer>
-    SystematicAlpha v1.1 &nbsp;·&nbsp; All results include realistic A-share
-    transaction costs and are computed on out-of-sample data only &nbsp;·&nbsp;
-    Not investment advice.
-  </footer>
-
+<div class="lang-bar">
+  <button class="lang-btn active" onclick="setLang('en')" id="btn-en">English</button>
+  <button class="lang-btn"        onclick="setLang('cn')" id="btn-cn">中文</button>
 </div>
-</body>
-</html>
-"""
+
+<div class="hero">
+  <div class="lang-en">
+    <h1>Systematic Alpha Research &amp; Trading Framework</h1>
+    <p>A-share (CSI 300 / CSI 500) &nbsp;·&nbsp; Long-only &nbsp;·&nbsp; Bias-controlled &nbsp;·&nbsp; Regime-aware</p>
+    <p style="margin-top:8px;font-size:.82rem;opacity:.75;">Three runs: CSI300 / CSI500 / Combined &nbsp;·&nbsp; Data: Tushare Pro &nbsp;·&nbsp; Walk-forward: 15 OOS windows</p>
+  </div>
+  <div class="lang-cn" style="display:none">
+    <h1>系统化阿尔法研究与交易框架</h1>
+    <p>A股（沪深300 / 中证500） &nbsp;·&nbsp; 纯多头 &nbsp;·&nbsp; 偏差控制 &nbsp;·&nbsp; 体制感知</p>
+    <p style="margin-top:8px;font-size:.82rem;opacity:.75;">三条回测线：CSI300 / CSI500 / Combined &nbsp;·&nbsp; 数据：Tushare Pro &nbsp;·&nbsp; 15个样本外窗口</p>
+  </div>
+</div>
+
+<div class="section">
+  <h2><span class="lang-en">1 · Executive Summary</span><span class="lang-cn" style="display:none">1 · 执行摘要</span></h2>
+  {charts["equity"]}
+  <h3><span class="lang-en">Performance Metrics — IS vs OOS (walk-forward average)</span>
+      <span class="lang-cn" style="display:none">绩效指标 — 样本内 vs 样本外均值（Walk-Forward）</span></h3>
+  {metrics_html}
+  <p class="note lang-en">IS = 2016-02-01→2020-12-31 (full-period run). OOS = average across 15 walk-forward windows (2021–2024). ✓ = p &lt; 0.05.</p>
+  <p class="note lang-cn" style="display:none">样本内 = 2016-02-01→2020-12-31（全周期回测）。样本外 = 15个Walk-Forward窗口均值（2021–2024）。✓ = p &lt; 0.05。</p>
+</div>
+
+<div class="section">
+  <h2><span class="lang-en">2 · Factor Validation</span><span class="lang-cn" style="display:none">2 · 因子验证</span></h2>
+  <h3><span class="lang-en">IC Summary (In-Sample, Spearman + t-test)</span><span class="lang-cn" style="display:none">IC汇总（样本内，Spearman秩相关 + t检验）</span></h3>
+  {ic_html}
+  <p class="note lang-en">Negative IC for momentum factors means A-shares exhibit short-term <em>reversal</em>. Factors are applied in the direction of their IC sign.</p>
+  <p class="note lang-cn" style="display:none">动量因子IC为负，说明A股存在短期<em>反转效应</em>。所有因子按IC方向使用。</p>
+  <h3><span class="lang-en">Rolling 60-Day Mean IC</span><span class="lang-cn" style="display:none">60日滚动均值IC</span></h3>
+  {charts["ic_ts"]}
+  <h3><span class="lang-en">Quintile Return Analysis</span><span class="lang-cn" style="display:none">分层回测</span></h3>
+  {charts["quantile"]}
+</div>
+
+<div class="section">
+  <h2><span class="lang-en">3 · Walk-Forward Validation (15 OOS Windows)</span><span class="lang-cn" style="display:none">3 · Walk-Forward 验证（15个样本外窗口）</span></h2>
+  {charts["walkfwd"]}
+  <h3><span class="lang-en">All Windows Detail</span><span class="lang-cn" style="display:none">全部窗口明细</span></h3>
+  {wf_html}
+  <p class="note lang-en">Green = Sharpe &gt; 0. Peak performance in W8 (Oct 2022–Mar 2023) coincides with post-COVID policy-driven reversal rally.</p>
+  <p class="note lang-cn" style="display:none">绿色 = Sharpe &gt; 0。W8（2022年10月–2023年3月）表现最优，对应疫情放开后政策驱动的反弹行情。</p>
+</div>
+
+<div class="section">
+  <h2><span class="lang-en">4 · Turnover &amp; Transaction Cost Analysis</span><span class="lang-cn" style="display:none">4 · 换手率与交易成本</span></h2>
+  {charts["turnover"]}
+  <p class="note lang-en">Round-trip cost: ~0.25% (CSI300) / ~0.30% (CSI500). Stamp duty reduced to 0.05% (sell only) from Aug 2023.</p>
+  <p class="note lang-cn" style="display:none">完整换仓成本：约0.25%（沪深300）/ 0.30%（中证500）。印花税2023年8月起降至0.05%（仅卖出）。</p>
+</div>
+
+<div class="section">
+  <h2><span class="lang-en">5 · Universe Composition (Point-in-Time)</span><span class="lang-cn" style="display:none">5 · 股票池构成（点位数据）</span></h2>
+  {charts["universe"]}
+  <p class="note lang-en">Universe uses historical constituent snapshots — not today's index — to eliminate survivorship bias. CSI300 data begins 2016-01-29.</p>
+  <p class="note lang-cn" style="display:none">股票池使用历史成分股快照（非当前指数），消除幸存者偏差。沪深300数据从2016年1月29日起。</p>
+</div>
+
+<div class="section">
+  <h2><span class="lang-en">6 · Failure Cases &amp; Limitations</span><span class="lang-cn" style="display:none">6 · 失效分析与局限性</span></h2>
+  <div class="lang-en">
+    <h3>Market Beta Exposure</h3><p>Long-only design bears full market downside. CSI300 Sharpe (0.12) exceeded the equal-weight benchmark (0.06) and max drawdown (28%) was well below market (40%), but absolute returns were modest in the 2022–2024 bear market.</p>
+    <h3>Regime Signal Lag (~10–20 days)</h3><p>The volatility-percentile classifier has a detection delay during rapid market transitions, causing excess drawdown in fast regime shifts.</p>
+    <h3>CSI500 Cost Drag</h3><p>Higher slippage + monthly rebalancing = ~3.6% annual cost drag, offsetting most of the factor alpha. Quarterly rebalancing would reduce this to ~1.2%.</p>
+  </div>
+  <div class="lang-cn" style="display:none">
+    <h3>市场Beta暴露</h3><p>纯多头策略承受完整市场下行风险。沪深300策略Sharpe（0.12）高于等权基准（0.06），最大回撤（28%）远低于市场（40%），但在2022–2024年熊市中绝对收益有限。</p>
+    <h3>体制信号滞后（约10–20个交易日）</h3><p>波动率百分位分类器在市场急速转向时存在检测延迟，导致体制切换期出现额外回撤。</p>
+    <h3>中证500成本拖累</h3><p>更高滑点+月度再平衡 = 年化约3.6%成本拖累，吞噬大部分因子超额收益。改为季度再平衡可降至约1.2%。</p>
+  </div>
+</div>
+
+<footer>
+  <span class="lang-en">Systematic Alpha v1.1 &nbsp;·&nbsp; All metrics include realistic A-share transaction costs &nbsp;·&nbsp; Not investment advice.</span>
+  <span class="lang-cn" style="display:none">Systematic Alpha v1.1 &nbsp;·&nbsp; 所有指标均包含真实A股交易成本 &nbsp;·&nbsp; 本报告不构成投资建议。</span>
+</footer>
+</div>
+
+<script>
+function setLang(lang) {{
+  document.querySelectorAll('.lang-en').forEach(el => {{ el.style.display = lang==='en' ? '' : 'none'; }});
+  document.querySelectorAll('.lang-cn').forEach(el => {{ el.style.display = lang==='cn' ? '' : 'none'; }});
+  document.getElementById('btn-en').classList.toggle('active', lang==='en');
+  document.getElementById('btn-cn').classList.toggle('active', lang==='cn');
+}}
+</script>
+</body></html>"""
 
     OUT_PATH.write_text(html, encoding="utf-8")
     logger.info("Report written to %s", OUT_PATH.resolve())

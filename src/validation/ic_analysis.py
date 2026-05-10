@@ -167,14 +167,19 @@ def run_validation(
     run_id: str,
     is_start: str,
     is_end: str,
+    output_dir=None,
 ) -> dict[str, pd.DataFrame]:
     """
     Run full IC validation for a single universe over the IS period.
 
     Args:
-        run_id:   'csi300' or 'csi500'
-        is_start: IS start date 'YYYY-MM-DD'
-        is_end:   IS end date   'YYYY-MM-DD'
+        run_id:     'csi300' or 'csi500'
+        is_start:   IS start date 'YYYY-MM-DD'
+        is_end:     IS end date   'YYYY-MM-DD'
+        output_dir: where to save results (pathlib.Path).
+                    Defaults to RESULTS/run_id.
+                    Walk-forward passes a window-specific subdir so it
+                    never overwrites the main ic_summary.parquet.
 
     Returns:
         dict with keys:
@@ -185,36 +190,18 @@ def run_validation(
     assert run_id in ("csi300", "csi500"), "run_validation only supports single-index runs."
     index_code = "000300.SH" if run_id == "csi300" else "000905.SH"
 
-    returns_df = pd.read_parquet(PROCESSED / "returns.parquet").sort_index()
-    factors    = {k: v.sort_index() for k, v in load_all_factors().items()}
+    returns_df = pd.read_parquet(PROCESSED / "returns.parquet")
+    factors    = load_all_factors()
 
-    reb_dates = [pd.Timestamp(d) for d in rebalance_dates(is_start, is_end)]
+    dates = pd.DatetimeIndex(
+        [pd.Timestamp(d) for d in rebalance_dates(is_start, is_end)]
+    )
 
-    # Pre-compute universe for each rebalance date (avoid per-day file IO)
-    logger.info("[%s] Pre-computing universes for %d rebalance dates…", run_id, len(reb_dates))
-    reb_universe_map: dict[pd.Timestamp, list[str]] = {}
-    for rd in reb_dates:
-        u = get_universe(rd, index_code)
-        if u:
-            reb_universe_map[rd] = u
-
-    if not reb_universe_map:
-        logger.error("[%s] No valid universe found in IS period — check constituent data.", run_id)
-        return {"ic_summary": pd.DataFrame(), "ic_decay": pd.DataFrame(), "ic_series": pd.DataFrame()}
-
-    # Map each trading day to its most recent rebalance date's universe
-    sorted_reb = sorted(reb_universe_map.keys())
+    # Expand dates to all trading days in IS window for IC series
     all_dates = returns_df.loc[is_start:is_end].index
-    # Only keep dates on or after the first valid rebalance date
-    first_valid = sorted_reb[0]
-    all_dates = all_dates[all_dates >= first_valid]
 
-    def universe_fn(dt: pd.Timestamp) -> list[str]:
-        # Find most recent rebalance date <= dt
-        valid = [r for r in sorted_reb if r <= dt]
-        if not valid:
-            return []
-        return reb_universe_map[valid[-1]]
+    def universe_fn(dt):
+        return get_universe(dt, index_code)
 
     summary_rows = []
     decay_frames = {}
@@ -249,12 +236,16 @@ def run_validation(
             decay_rows.append(r)
     decay_df = pd.DataFrame(decay_rows)
 
-    # Persist
-    out_dir = RESULTS / run_id
+    # Persist — use caller-supplied output_dir (walk-forward uses window subdir)
+    if output_dir is None:
+        out_dir = RESULTS / run_id
+    else:
+        import pathlib
+        out_dir = pathlib.Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    write_parquet(summary_df,  out_dir / "ic_summary.parquet")
+    write_parquet(summary_df,   out_dir / "ic_summary.parquet")
     write_parquet(ic_series_df, out_dir / "ic_series.parquet")
-    write_parquet(decay_df,    out_dir / "ic_decay.parquet")
+    write_parquet(decay_df,     out_dir / "ic_decay.parquet")
     logger.info("[%s] Validation complete. Results saved to %s.", run_id, out_dir)
 
     return {"ic_summary": summary_df, "ic_decay": decay_df, "ic_series": ic_series_df}

@@ -2,8 +2,6 @@
 data/
 
 # Generated outputs
-report.html
-*.html
 *.zip
 
 # Python
