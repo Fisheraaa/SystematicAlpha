@@ -114,7 +114,8 @@ def _ic_table() -> str:
             pval = rd.get("p_value", float("nan"))
             ppct = rd.get("pct_positive", float("nan"))
             sig  = " ✓" if (not np.isnan(pval) and pval < 0.05) else ""
-            row += f"<td>{_fmt(icir,'{:.3f}')}</td><td>{_fmt(pval,'{:.3f}')}{sig}</td><td>{_fmt(ppct,'{:.1%}')}</td>"
+            pval_str = "< 0.001" if (not np.isnan(pval) and pval < 0.001) else _fmt(pval, '{:.3f}')
+            row += f"<td>{_fmt(icir,'{:.3f}')}</td><td>{pval_str}{sig}</td><td>{_fmt(ppct,'{:.1%}')}</td>"
         rows += row + "</tr>"
 
     hdr_en = "<tr><th>Factor</th><th>CSI300 ICIR</th><th>p-val</th><th>IC>0%</th><th>CSI500 ICIR</th><th>p-val</th><th>IC>0%</th></tr>"

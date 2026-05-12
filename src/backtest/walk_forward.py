@@ -1,33 +1,24 @@
 """src/backtest/walk_forward.py
 
-Walk-forward validation: slides a training window across time, re-calibrates
-IC weights on each training fold, runs the backtest on the held-out test fold,
-and aggregates OOS performance statistics.
+Walk-forward validation with resume support and faster IC validation.
 
-Configuration (from config.yaml):
-    train_months: 24
-    test_months:   6
-    step_months:   3
-    oos_start: '2021-01-01'
-    oos_end:   '2024-12-31'
+Resume logic: if wf_window_XX.parquet already exists for a window, that
+window is skipped entirely and its saved results are loaded. This means
+you can Ctrl-C at any point and re-run without losing completed windows.
 
-For 4 OOS years with step=3 months → 13 rolling windows.
-
-Public API
-----------
-run_walk_forward(run_id) -> pd.DataFrame
-    Returns a DataFrame with one row per test window:
-    window_id, train_start, train_end, test_start, test_end,
-    sharpe, max_drawdown, annual_return, calmar, ir, win_rate, turnover.
+IC validation is also skipped per-sub-index if wf_val_XX/ already exists
+and contains a valid ic_summary.parquet.
 """
 from __future__ import annotations
 
 import logging
 from dateutil.relativedelta import relativedelta
+from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
-from src.utils import load_config, write_parquet, RESULTS
+from src.utils import load_config, write_parquet, read_parquet, RESULTS, PROCESSED
 from src.validation.ic_analysis import run_validation
 from src.strategy.composite import build_composite_weights
 from src.backtest.engine import run_backtest
@@ -41,22 +32,12 @@ def _add_months(dt: pd.Timestamp, months: int) -> pd.Timestamp:
 
 
 def _benchmark_equity(run_id: str, start: str, end: str) -> pd.Series:
-    """
-    Build a benchmark equity series (base 1.0) for the given period.
-    Uses the equal-weight average return of all stocks in the universe
-    as a proxy — same approximation used in regime detection.
-
-    For a production system, load actual CSI 300 / CSI 500 TR index prices.
-    """
-    from src.utils import PROCESSED
-    import numpy as np
     returns = pd.read_parquet(PROCESSED / "returns.parquet").loc[start:end]
     idx_ret = returns.mean(axis=1)
     return np.exp(idx_ret.cumsum())
 
 
 def _window_dates(cfg_wf: dict) -> list[dict]:
-    """Generate all train/test window date ranges."""
     oos_start = pd.Timestamp(cfg_wf["oos_start"])
     oos_end   = pd.Timestamp(cfg_wf["oos_end"])
     train_m   = cfg_wf["train_months"]
@@ -68,13 +49,11 @@ def _window_dates(cfg_wf: dict) -> list[dict]:
     window_id  = 1
 
     while True:
-        test_end   = _add_months(test_start, test_m) - pd.Timedelta(days=1)
-        train_end  = test_start - pd.Timedelta(days=1)
+        test_end    = _add_months(test_start, test_m) - pd.Timedelta(days=1)
+        train_end   = test_start - pd.Timedelta(days=1)
         train_start = _add_months(train_end, -train_m) + pd.Timedelta(days=1)
-
         if test_end > oos_end:
             break
-
         windows.append({
             "window_id":   window_id,
             "train_start": train_start.strftime("%Y-%m-%d"),
@@ -82,68 +61,123 @@ def _window_dates(cfg_wf: dict) -> list[dict]:
             "test_start":  test_start.strftime("%Y-%m-%d"),
             "test_end":    test_end.strftime("%Y-%m-%d"),
         })
-
         test_start = _add_months(test_start, step_m)
         window_id += 1
 
     return windows
 
 
+EXPECTED_FACTORS = {"mom_5d", "mom_20d", "zscore_20d", "rsi_14d"}
+
+def _val_dir_complete(val_dir: Path) -> bool:
+    """True only if ic_summary.parquet exists with all 4 expected factors."""
+    summary = val_dir / "ic_summary.parquet"
+    if not summary.exists():
+        return False
+    try:
+        df = pd.read_parquet(summary)
+        return EXPECTED_FACTORS.issubset(set(df.index))
+    except Exception:
+        return False
+
+
+def _window_result_exists(run_id: str, wid: int, w: dict) -> tuple[bool, dict]:
+    """
+    Check if this window's backtest result exists and compute metrics from it.
+    Returns (exists, metrics_dict).
+    """
+    daily_path = RESULTS / run_id / f"wf_window_{wid:02d}.parquet"
+    if not daily_path.exists():
+        return False, {}
+    try:
+        daily_df = pd.read_parquet(daily_path)
+        if daily_df.empty or len(daily_df) < 2:
+            return False, {}
+        equity    = daily_df["equity"]
+        benchmark = _benchmark_equity(run_id, w["test_start"], w["test_end"]) * equity.iloc[0]
+        trades_path = RESULTS / run_id / f"wf_window_{wid:02d}_trades.parquet"
+        trades_df   = pd.read_parquet(trades_path) if trades_path.exists() else pd.DataFrame()
+        metrics = compute_all_metrics(equity, benchmark, trades_df)
+        return True, metrics
+    except Exception as exc:
+        logger.warning("Could not load window %d result: %s", wid, exc)
+        return False, {}
+
+
 def run_walk_forward(run_id: str) -> pd.DataFrame:
     """
     Execute walk-forward validation for a given run_id.
 
-    For each window:
-      1. Run IC validation on the training fold to get IC weights.
-      2. Run backtest on the test fold with those weights.
-      3. Record performance metrics.
-
-    Results are persisted to data/results/{run_id}/walk_forward.parquet.
+    Resume-safe: completed windows (wf_window_XX.parquet present) are
+    skipped automatically. Re-running after a Ctrl-C continues from where
+    it left off.
     """
-    cfg     = load_config()
-    cfg_wf  = cfg["walk_forward"]
+    cfg    = load_config()
+    cfg_wf = cfg["walk_forward"]
     windows = _window_dates(cfg_wf)
 
-    logger.info("[%s] Starting walk-forward: %d windows.", run_id, len(windows))
+    # Count already-completed windows for the log message
+    already_done = sum(
+        1 for w in windows
+        if _window_result_exists(run_id, w["window_id"], w)[0]
+    )
+    remaining = len(windows) - already_done
+    logger.info(
+        "[%s] Walk-forward: %d windows total, %d already done, %d to run.",
+        run_id, len(windows), already_done, remaining,
+    )
 
     rows = []
 
     for w in windows:
-        wid   = w["window_id"]
-        t_s   = w["train_start"]
-        t_e   = w["train_end"]
-        te_s  = w["test_start"]
-        te_e  = w["test_end"]
+        wid  = w["window_id"]
+        t_s  = w["train_start"]
+        t_e  = w["train_end"]
+        te_s = w["test_start"]
+        te_e = w["test_end"]
+
+        # ── Resume: load existing result and skip ─────────────────────────
+        exists, saved_row = _window_result_exists(run_id, wid, w)
+        if exists:
+            logger.info(
+                "[%s] Window %d/%d: SKIPPING (already done — Sharpe=%.3f)",
+                run_id, wid, len(windows),
+                saved_row.get("sharpe_ratio", float("nan")),
+            )
+            rows.append({**w, **saved_row})
+            continue
 
         logger.info(
             "[%s] Window %d/%d: train %s→%s, test %s→%s",
             run_id, wid, len(windows), t_s, t_e, te_s, te_e,
         )
 
-        # ── Step 1: calibrate IC weights on training fold ──────────────────
-        # Use a window-specific output dir so walk-forward never overwrites
-        # the main ic_summary.parquet produced by --validate.
+        # ── Step 1: IC validation (skip sub-index if already done) ────────
         wf_val_dir_300 = RESULTS / "csi300" / f"wf_val_{wid:02d}"
         wf_val_dir_500 = RESULTS / "csi500" / f"wf_val_{wid:02d}"
 
         if run_id == "combined":
             for sub_id, val_dir in (("csi300", wf_val_dir_300), ("csi500", wf_val_dir_500)):
-                try:
-                    run_validation(sub_id, t_s, t_e, output_dir=val_dir)
-                except Exception as exc:
-                    logger.warning("Validation failed for %s window %d: %s", sub_id, wid, exc)
+                if _val_dir_complete(val_dir):
+                    logger.info("[%s] Window %d: %s IC already cached — skipping.", run_id, wid, sub_id)
+                else:
+                    try:
+                        run_validation(sub_id, t_s, t_e, output_dir=val_dir)
+                    except Exception as exc:
+                        logger.warning("Validation failed for %s window %d: %s", sub_id, wid, exc)
             ic_weights = build_composite_weights("combined", t_s, t_e)
         else:
             val_dir = wf_val_dir_300 if run_id == "csi300" else wf_val_dir_500
-            try:
-                run_validation(run_id, t_s, t_e, output_dir=val_dir)
-            except Exception as exc:
-                logger.warning("Validation failed window %d: %s", wid, exc)
+            if _val_dir_complete(val_dir):
+                logger.info("[%s] Window %d: IC already cached — skipping validation.", run_id, wid)
+            else:
+                try:
+                    run_validation(run_id, t_s, t_e, output_dir=val_dir)
+                except Exception as exc:
+                    logger.warning("Validation failed window %d: %s", wid, exc)
             ic_weights = build_composite_weights(run_id, t_s, t_e)
 
-        # ── Step 2: backtest on test fold ─────────────────────────────────
-        # Use a unique stem so walk-forward windows never overwrite the main
-        # full-period daily_state.parquet produced by --backtest.
+        # ── Step 2: backtest ──────────────────────────────────────────────
         wf_stem = f"wf_window_{wid:02d}"
         try:
             daily_df, trades_df = run_backtest(
@@ -153,11 +187,10 @@ def run_walk_forward(run_id: str) -> pd.DataFrame:
             logger.error("Backtest failed window %d: %s", wid, exc)
             continue
 
-        equity = daily_df["equity"]
+        equity    = daily_df["equity"]
         benchmark = _benchmark_equity(run_id, te_s, te_e) * equity.iloc[0]
-
-        metrics = compute_all_metrics(equity, benchmark, trades_df)
-        row = {**w, **metrics}
+        metrics   = compute_all_metrics(equity, benchmark, trades_df)
+        row       = {**w, **metrics}
         rows.append(row)
 
         logger.info(
@@ -178,10 +211,7 @@ def run_walk_forward(run_id: str) -> pd.DataFrame:
     out_dir.mkdir(parents=True, exist_ok=True)
     write_parquet(result_df, out_dir / "walk_forward.parquet")
 
-    # Summary statistics
-    numeric = result_df.select_dtypes(include="number").drop(
-        columns=["window_id"], errors="ignore"
-    )
+    numeric = result_df.select_dtypes(include="number").drop(columns=["window_id"], errors="ignore")
     summary = numeric.agg(["mean", "std", "min", "max"])
     logger.info(
         "[%s] Walk-forward summary:\n%s",
