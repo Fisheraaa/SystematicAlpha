@@ -4,12 +4,19 @@
 
 **[English](#english-version) · [中文](#chinese-version-中文说明)**
 
-### https://fisheraaa.github.io/SystematicAlpha/report.html
+### 📊 [Live Report](https://fisheraaa.github.io/SystematicAlpha/report.html)
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 </div>
+
+---
+
+> **Background:** Built independently during spare time in my first year of university (CS major, no prior quant experience).  
+> The first working version took ~1 week of evenings. This version reflects subsequent iteration.  
+> **Goal:** Learn what a rigorous research process actually looks like — not to find a profitable strategy on the first try.  
+> The results are honest: the strategy doesn't make money. That's the point.
 
 ---
 
@@ -105,10 +112,25 @@ A-share markets exhibit **short-term reversal** (not momentum continuation) — 
 
 ---
 
+### What I Learned & What's Next
+
+**What the results actually mean:**  
+The strategy loses money in a bear market — but so does the market, and we lose less (28% drawdown vs 40%). The more important result is that the factors are statistically real. The problem isn't factor quality; it's that a long-only structure can't separate alpha from beta.
+
+**What I'd build next:**
+- Add a market-neutral long/short overlay to isolate pure factor alpha from directional market exposure
+- Explore NLP-based sentiment factors using earnings call transcripts and news flow
+- Investigate whether the A-share reversal effect is more pronounced in certain liquidity regimes
+
+**What surprised me:**  
+How large the gap between "looks good in backtest" and "survives rigorous OOS validation" is. The walk-forward distribution (Sharpe std ~1.2) shows the strategy has windows of real alpha — the challenge is regime-dependence, not factor validity.
+
+---
+
 ### Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/SystematicAlpha
+git clone https://github.com/fisheraaa/SystematicAlpha
 cd SystematicAlpha
 pip install -r requirements.txt
 pip install python-dateutil
@@ -173,16 +195,19 @@ Covers: look-ahead bias detection · PIT universe integrity · A-share cost arit
 MIT. Not investment advice.
 
 ---
----
 
 ## Chinese Version (中文说明)
 
-<details>
-<summary><strong>点击展开中文说明</strong></summary>
+> **背景：** 大一在读（计算机专业），无量化基础，利用课余时间自学。 
+> 第一个可运行版本耗时约一周的晚上。当前版本经过多次迭代。  
+> **目标：** 弄清楚一个严谨的量化研究流程应该长什么样——而不是第一次就做出赚钱的策略。  
+> 结果是诚实的：这个策略目前不赚钱。这正是重点所在。
+
+---
 
 ### 项目简介
 
-针对A股市场（沪深300 / 中证500，2016–2024年）的偏差控制型纯多头量化股票研究平台。核心理念是方法论严谨性优先于回测结果好看——框架的设计目标是诚实地回答：
+针对A股市场（沪深300 / 中证500，2016–2024年）的偏差控制型纯多头量化股票研究平台。核心理念是**方法论严谨性优先于回测结果好看**——框架的设计目标是诚实地回答：
 
 > "这些因子是否具有统计显著的预测力？这种预测力能否在真实交易成本下的样本外数据中存活？"
 
@@ -226,9 +251,9 @@ MIT. Not investment advice.
 
 **2. 自动化前视偏差检测**：所有滚动计算使用 `closed='left'` 或 `.shift(1)`，并通过单元测试自动验证，不依赖人工审查。
 
-**3. A股真实成本模型**：买入约0.076%，卖出约0.126%（含印花税0.05%，2023年8月减半后），完整换仓约0.25%（沪深300）/ 0.30%（中证500），严格执行T+1规则。
+**3. A股真实成本模型**：完整换仓约0.25%（沪深300）/ 0.30%（中证500），含佣金、印花税（2023年8月减半后0.05%）、过户费及滑点，严格执行T+1规则。
 
-**4. Walk-Forward验证（15个样本外窗口）**：训练24月→测试6月→步长3月，产出性能分布而非单一数字。
+**4. Walk-Forward验证（15个样本外窗口）**：训练24月→测试6月→步长3月，产出性能**分布**而非单一数字。
 
 **5. 三条独立回测线**：沪深300 / 中证500 / 混合组合（40%/60%），各自对应专属基准评估。
 
@@ -236,14 +261,29 @@ MIT. Not investment advice.
 
 ### 核心发现
 
-A股市场存在显著的**短期反转效应**而非动量延续效应——近期强势股倾向于跑输。全部4个预测因子均达到p<0.001显著水平。然而纯多头结构承受完整的市场Beta风险：在2022–2024年熊市中，因子选股能降低但无法消除亏损。全周期来看，沪深300策略的夏普比率（0.12）高于等权市场基准（0.06），最大回撤（28%）显著低于市场（40%）。
+A股市场存在显著的**短期反转效应**而非动量延续——近期强势股倾向于跑输。全部4个预测因子均达到p<0.001显著水平。然而纯多头结构承受完整的市场Beta风险：在2022–2024年熊市中，因子选股能降低但无法消除亏损。全周期来看，沪深300策略夏普比率（0.12）高于等权市场基准（0.06），最大回撤（28%）显著低于市场（40%）。
+
+---
+
+### 我学到了什么 & 下一步
+
+**结果意味着什么：**  
+策略在熊市中亏钱——但市场整体也在亏，而且我们亏得更少（回撤28% vs 40%）。更重要的结论是：因子的统计预测力是真实存在的。问题不在于因子质量，而在于纯多头结构无法把alpha从市场beta中剥离出来。
+
+**如果继续做，我会：**
+- 加入市场中性的多空结构，把纯因子alpha从方向性市场暴露中隔离出来
+- 探索基于财报电话会议和新闻流的NLP情绪因子
+- 研究A股反转效应在不同流动性状态下是否有显著差异
+
+**最让我意外的事：**  
+"回测看起来不错"和"通过严格样本外验证"之间的差距有多大。Walk-Forward的夏普标准差约为1.2，说明策略在某些窗口期有真实的alpha——挑战在于状态依赖性，而不是因子本身无效。
 
 ---
 
 ### 快速开始
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/SystematicAlpha
+git clone https://github.com/fisheraaa/SystematicAlpha
 cd SystematicAlpha
 pip install -r requirements.txt
 pip install python-dateutil
@@ -266,12 +306,11 @@ python main.py --report         # 生成 report.html（含中英切换）
 
 - **市场Beta暴露**：纯多头无法对冲系统性市场风险，在单边下跌行情中会承受完整市场跌幅
 - **体制信号滞后**：波动率百分位分类器在市场急速转向时有约10–20个交易日的检测延迟
-- **中证500成本拖累**：月度再平衡叠加更高滑点，年化成本拖累约3.6%
+- **中证500成本拖累**：月度再平衡叠加更高滑点，年化成本拖累约3.6%；改为季度再平衡可降至约1.2%
 - **指数近似**：体制检测使用等权股票均值代替真实指数序列
 - **沪深300数据缺口**：Tushare成分股数据从2016年1月29日开始
 
-</details>
-
 ---
 
-*Data source: Tushare Pro. The `data/` directory is excluded from this repository (proprietary market data). · 数据来源：Tushare Pro。`data/` 目录已从仓库中排除（含版权行情数据）。*
+*数据来源：Tushare Pro。`data/` 目录已从仓库中排除（含版权行情数据）。*  
+*Data source: Tushare Pro. The `data/` directory is excluded from this repository (proprietary market data).*
